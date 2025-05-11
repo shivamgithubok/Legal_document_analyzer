@@ -1,56 +1,108 @@
 import os
 import faiss
-import torch
-from llama_index.core import StorageContext
-from llama_index.vector_stores.faiss import FaissVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core.node_parser import SimpleNodeParser
-from llama_index.core import VectorStoreIndex
-from llama_index.core.schema import Document
+import numpy as np
+from dotenv import load_dotenv
+from llama_parse import LlamaParse
+import google.generativeai as genai
+import json
+from io import BytesIO
+from chunking import chunk_text
 
-# ✅ Ensure FAISS directory exists
-persist_dir = "faiss_index"
-os.makedirs(persist_dir, exist_ok=True)
+# ─── ENV SETUP ────────────────────────────────────────────────────────────────
 
-# ✅ Load Legal-BERT embedding model
-model_name = "nlpaueb/legal-bert-base-uncased"
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"🔍 Loading model: {model_name} on {device.upper()}")
+load_dotenv()
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
+if not GOOGLE_API_KEY or not LLAMA_API_KEY:
+    raise ValueError("❌ GOOGLE_API_KEY or LLAMA_API_KEY is not set!")
 
-embed_model = HuggingFaceEmbedding(model_name=model_name, device=device)
+genai.configure(api_key=GOOGLE_API_KEY)
 
-# ✅ Read file content safely
-file_path = "chunked_output.txt"
-if not os.path.exists(file_path):
-    raise FileNotFoundError(f"❌ Error: File '{file_path}' not found!")
+# ─── EMBEDDING FUNCTION ──────────────────────────────────────────────────────
 
-with open(file_path, "r", encoding="utf-8") as f:
-    text = f.read().strip()
-    if not text:
-        raise ValueError(f"❌ Error: File '{file_path}' is empty!")
+def embed_text(text: str) -> list:
+    try:
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=text,
+            task_type="SEMANTIC_SIMILARITY"
+        )
+        return result["embedding"]
+    except Exception as e:
+        raise ValueError(f"Embedding failed: {e}")
 
-# ✅ Create document object
-documents = [Document(text=text)]
+# ─── LlamaParse PDF TEXT EXTRACTION FUNCTION ──────────────────────────────
 
-# ✅ Chunking for better retrieval
-parser = SimpleNodeParser.from_defaults(chunk_size=200, chunk_overlap=20)
-nodes = parser.get_nodes_from_documents(documents)
+def extract_text_using_llama_parser(pdf_input: str | BytesIO) -> str:
+    try:
+        # Initialize LlamaParse with API key
+        parser = LlamaParse(
+            api_key=LLAMA_API_KEY,
+            result_type="text"  # Can be "text" or "markdown"
+        )
+        # Parse the PDF (handle both file path and in-memory file)
+        if isinstance(pdf_input, str):
+            documents = parser.load_data(pdf_input)
+        else:
+            # Save temporary file for LlamaParse
+            temp_path = "temp.pdf"
+            with open(temp_path, "wb") as f:
+                f.write(pdf_input.read())
+            documents = parser.load_data(temp_path)
+            os.remove(temp_path)
+        # Combine text from all documents
+        text = "Latin1".join(doc.text for doc in documents if doc.text)
+        if not text:
+            raise ValueError("No text extracted from PDF")
+        return text
+    except Exception as e:
+        raise ValueError(f"PDF text extraction failed: {e}")
 
-# ✅ FAISS Initialization (Only CPU for Colab)
-dimension = 768  # Legal-BERT outputs 768-dimensional vectors
-faiss_index = faiss.IndexFlatL2(dimension)  # FAISS CPU version
+# ─── MAIN FUNCTION ───────────────────────────────────────────────────────────
 
-vector_store = FaissVectorStore(faiss_index=faiss_index)
+def store_embeddings_from_pdf(pdf_input: str | BytesIO, persist_dir="faiss_index"):
+    try:
+        os.makedirs(persist_dir, exist_ok=True)
 
-# ✅ Create and save index with embeddings
-storage_context = StorageContext.from_defaults(vector_store=vector_store)
-index = VectorStoreIndex(nodes, storage_context=storage_context, embed_model=embed_model)
+        # Step 1: Extract text using LlamaParse
+        full_text = extract_text_using_llama_parser(pdf_input)
 
-# ✅ Persist metadata
-index.storage_context.persist(persist_dir=persist_dir)
+        # Step 2: Split into chunks using chunking.py
+        nodes = chunk_text(full_text, chunk_size=200, chunk_overlap=20)
 
-# ✅ Save FAISS index separately
-faiss_path = os.path.join(persist_dir, "faiss.index")
-faiss.write_index(faiss_index, faiss_path)
+        # Step 3: Generate embeddings
+        embeddings = []
+        for node in nodes:
+            emb = embed_text(node.get_content())
+            embeddings.append(emb)
 
-print(f"✅ FAISS index and metadata saved successfully on {device.upper()}!")
+        # Convert to NumPy for FAISS
+        embedding_matrix = np.array(embeddings).astype("float32")
+        if embedding_matrix.ndim != 2:
+            raise ValueError(f"Invalid embedding shape: {embedding_matrix.shape}")
+
+        # Step 4: Build FAISS index
+        embedding_dim = embedding_matrix.shape[1]
+        faiss_index = faiss.IndexFlatL2(embedding_dim)
+        faiss_index.add(embedding_matrix)
+
+        # Step 5: Save FAISS and docs
+        faiss.write_index(faiss_index, os.path.join(persist_dir, "faiss.index"))
+
+        # Store nodes and full text to recreate context later
+        doc_path = os.path.join(persist_dir, "documents.json")
+        with open(doc_path, "w", encoding="utf-8") as f:
+            json.dump({"nodes": [node.dict() for node in nodes], "full_text": full_text}, f)
+
+        print("✅ Embeddings stored successfully.")
+        return {
+            "nodes": nodes,
+            "embedding_matrix": embedding_matrix,
+            "faiss_index": faiss_index,
+            "full_text": full_text
+        }
+    except Exception as e:
+        raise ValueError(f"Embedding storage failed: {e}")
+
+# Example usage
+# store_embeddings_from_pdf('path_to_your_pdf.pdf')

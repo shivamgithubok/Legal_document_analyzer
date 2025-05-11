@@ -16,3 +16,6 @@ fitz==0.0.1.dev2
 protobuf==3.20.3
 python-dotenv==1.0.1
 sentence_transformers==3.4.1
+llama-index 
+google-generativeai 
+python-dotenv

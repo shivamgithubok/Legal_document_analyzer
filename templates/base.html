@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Legal Document Analyzer{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .flash-message {
+            transition: opacity 0.5s ease-out;
+        }
+        .flash-message.hide {
+            opacity: 0;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Flash messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div id="flash-messages" class="mb-4">
+                    {% for category, message in messages %}
+                        <div class="flash-message p-4 rounded {% if category == 'success' %}bg-green-100 text-green-700{% else %}bg-red-100 text-red-700{% endif %}">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                </div>
+                <script>
+                    setTimeout(() => {
+                        const messages = document.querySelectorAll('.flash-message');
+                        messages.forEach(msg => {
+                            msg.classList.add('hide');
+                            setTimeout(() => msg.remove(), 500);
+                        });
+                    }, 3000);
+                </script>
+            {% endif %}
+        {% endwith %}
+
+        <!-- Content -->
+        {% block content %}
+        {% endblock %}
+    </div>
+</body>
+</html>
